@@ -85,9 +85,23 @@ class PermissionManager:
         if self.mode == "plan":
             if tool_name in WRITE_TOOLS:
                 return {
-                    "bahavior": "deny",
+                    "behavior": "deny",
                     "reason": "Plan mode: Write operations are blocked"
                 }
+
+        # Step 3: Explicit allow rules (DEFAULT_RULES + user "always" entries)
+        # Must run before auto mode: auto previously returned "ask" for non-read tools
+        # without consulting these rules, so "always" for e.g. todo was ignored.
+        for rule in self.rules:
+            if rule["behavior"] != "allow":
+                continue
+            if self._matches(rule, tool_name, tool_input):
+                self.consecutive_denials = 0
+                print("匹配成功")
+                return {"behavior": "allow",
+                        "reason": f"Matched allow rule: {rule}"}
+
+        if self.mode == "plan":
             return {"behavior": "allow", "reason": "Plan mode: read-only allowed"}
 
         if self.mode == "auto":
@@ -95,18 +109,8 @@ class PermissionManager:
                 return {"behavior": "allow",
                         "reason": "Auto mode: read-only tool auto-approved"}
             return {"behavior": "ask",
-                "reason": f"Plan mode: asking user for {tool_name}"}
-        
-        # Step 3: Allow Rules
-        for rule in self.rules:
-            if rule["behavior"] != "allow":
-                continue
-            if self._matches(rule, tool_name, tool_input):
-                self.consecutive_denials = 0
-                return {"behavior": "allow",
-                        "reason": f"Matched allow rule: {rule}"}
-        
-         # Step 4: Ask user (default behavior for unmatched tools)
+                    "reason": f"Auto mode: asking user for {tool_name}"}
+
         return {"behavior": "ask",
                 "reason": f"No rule matched for {tool_name}, asking user"}
     
@@ -149,3 +153,5 @@ class PermissionManager:
             command = tool_input.get("command", "")
             if not fnmatch(command, rule["content"]):
                 return False
+
+        return True

@@ -1,10 +1,12 @@
 import os
 from dotenv import load_dotenv
 from anthropic import Anthropic
+from memory import memory_mgr
 from tools import TOOL_HANDLERS,CHILD_TOOLS,PARENT_TOOLS
 from compact import micro_compact, compact_history, estimate_tokens, CompactState     
-from settings import MODEL,SUBAGENT_SYSTEM,THRESHOLD,SYSTEM,MODES
+from settings import MODEL,SUBAGENT_SYSTEM,THRESHOLD,SYSTEM,MODES,MEMORY_GUIDANCE
 from permission import PermissionManager
+from skills import SKILL_REGISTRY
 load_dotenv()
 
 client = Anthropic(
@@ -12,6 +14,20 @@ client = Anthropic(
     base_url=os.environ.get('ANTHROPIC_BASE_URL')
 )
 
+
+
+def build_system_prompt() ->str:
+    parts = [SYSTEM]
+
+    skills_section = "Skills available:\n" + SKILL_REGISTRY.describe_available()
+    if skills_section:
+        parts.append(skills_section)
+    memory_section = memory_mgr.load_memory_prompt()
+    if memory_section:
+        parts.append(memory_section)
+
+    parts.append(MEMORY_GUIDANCE)
+    return "\n\n".join(parts)
 
 def run_subagent(prompt: str) -> str:
     sub_messages = [{"role": "user", "content": prompt}]  # fresh context
@@ -105,10 +121,12 @@ def agent_loop(messages: list, state: CompactState, perms: PermissionManager):
             messages[:] = compact_history(messages, state, client=client, model=MODEL)
 
         # --- 2. 调用 LLM ---
+        system = build_system_prompt()
+
         response = client.messages.create(
-            model=MODEL, system=SYSTEM, messages=messages,
+            model=MODEL, system=system, messages=messages,
             tools=PARENT_TOOLS, max_tokens=8000,
-        )    
+        )   
         messages.append({"role": "assistant", "content": response.content})
         
         # --- 3. 检查终止条件 ---
@@ -174,7 +192,15 @@ def agent_loop(messages: list, state: CompactState, perms: PermissionManager):
             messages[:] = compact_history(messages, state, client=client, model=MODEL, focus=current_compact_focus)
             return
 
+
 if __name__ == "__main__":
+    memory_mgr.load_all()
+    mem_count = len(memory_mgr.memories)
+    if mem_count:
+        print(f"[{mem_count} memories loaded into context]")
+    else:
+        print("[No existing memories. The agent can create them with save_memory.]")
+
     history = []
     compact_state = CompactState()
     print("Permission modes: default, plan, auto")
@@ -187,6 +213,7 @@ if __name__ == "__main__":
 
     while True:
         try:
+            print("context token percentage: ", estimate_tokens(history) / THRESHOLD)
             query = input("\033[36ms01 >> \033[0m")
         except (EOFError, KeyboardInterrupt):
             break    
@@ -206,6 +233,15 @@ if __name__ == "__main__":
             for i, rule in enumerate(perms.rules):
                 print(f"  {i}: {rule}")
             continue
+
+        if query.strip() == "/memories":
+            if memory_mgr.memories:
+                for name, mem in memory_mgr.memories.items():
+                    print(f"  [{mem['type']}] {name}: {mem['description']}")
+            else:
+                print("  (no memories)")
+            continue
+
 
         history.append({"role": "user", "content": query})
         agent_loop(history, compact_state, perms)

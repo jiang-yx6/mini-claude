@@ -2,7 +2,8 @@ import subprocess
 from pathlib import Path
 from todo import TODO
 import os
-
+from memory import MemoryManager, memory_mgr
+from skills import SKILL_REGISTRY
 WORKDIR = Path.cwd()
 def safe_path(p: str) -> Path:
     path = (WORKDIR / p).resolve()
@@ -54,6 +55,8 @@ def run_edit(path: str, old_text: str, new_text: str) -> str:
     except Exception as e:
         return f"Error: {e}"
     
+def run_save_memory(name: str, description: str, mem_type: str, content: str, memory_mgr: MemoryManager) ->str:
+    return memory_mgr.save_memory(name, description, mem_type, content)
 
 TOOL_HANDLERS = {
     "bash":       lambda **kw: run_bash(kw["command"]),
@@ -62,7 +65,8 @@ TOOL_HANDLERS = {
     "edit_file":  lambda **kw: run_edit(kw["path"], kw["old_text"], kw["new_text"]),
     "todo":       lambda **kw: TODO.update(kw["items"]),
     "compact":    lambda **kw: "Manual compression requested.",
-
+    "save_memory":  lambda **kw: run_save_memory(kw["name"], kw["description"], kw["type"], kw["content"], memory_mgr),
+    "load_skill": lambda **kw: SKILL_REGISTRY.load_full_text(kw["name"]),
 }
 
 CHILD_TOOLS = [
@@ -132,6 +136,29 @@ PARENT_TOOLS = CHILD_TOOLS + [
                 "focus": {"type": "string", "description": "What to preserve in the summary"}
             }
         }
+    },
+    {
+        "name": "save_memory", 
+        "description": "Save a persistent memory that survives across sessions.",
+        "input_schema": {
+            "type": "object", 
+            "properties": {
+                "name": {"type": "string", "description": "Short identifier (e.g. prefer_tabs, db_schema)"},
+                "description": {"type": "string", "description": "One-line summary of what this memory captures"},
+                "type": {"type": "string", "enum": ["user", "feedback", "project", "reference"],
+                        "description": "user=preferences, feedback=corrections, project=non-obvious project conventions or decision reasons, reference=external resource pointers"},
+                "content": {"type": "string", "description": "Full memory content (multi-line OK)"},
+            }, "required": ["name", "description", "type", "content"]
+     }
+    },
+    {
+        "name": "load_skill",
+        "description": "Load the full body of a named skill into the current context.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"name": {"type": "string"}},
+            "required": ["name"],
+        },
     },
 ]
 
