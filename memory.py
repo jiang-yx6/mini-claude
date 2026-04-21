@@ -5,16 +5,12 @@ import subprocess
 from pathlib import Path
 from anthropic import Anthropic
 from dotenv import load_dotenv
+from settings import MEMORY_DIR,MEMORY_INDEX,MEMORY_TYPES,MAX_INDEX_LINES
 load_dotenv(override=True)
 if os.getenv("ANTHROPIC_BASE_URL"):
     os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
-WORKDIR = Path.cwd()
 client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))
-MODEL = os.environ["MODEL_ID"]
-MEMORY_DIR = WORKDIR / ".memory"
-MEMORY_INDEX = MEMORY_DIR / "MEMORY.md"
-MEMORY_TYPES = ("user", "feedback", "project", "reference")
-MAX_INDEX_LINES = 200
+
 class MemoryManager:
     """
     Load, build, and save persistent memories across sessions.

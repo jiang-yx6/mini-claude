@@ -1,12 +1,15 @@
 import os
 from dotenv import load_dotenv
-from anthropic import Anthropic
+from anthropic import Anthropic,APIError
 from memory import memory_mgr
 from tools import TOOL_HANDLERS,CHILD_TOOLS,PARENT_TOOLS
-from compact import micro_compact, compact_history, estimate_tokens, CompactState     
-from settings import MODEL,SUBAGENT_SYSTEM,THRESHOLD,SYSTEM,MODES,MEMORY_GUIDANCE
+from compact import micro_compact, compact_history, estimate_tokens, CompactState ,persist_large_output
+from settings import MODEL,SUBAGENT_SYSTEM,THRESHOLD,SYSTEM,MODES,MEMORY_GUIDANCE,MAX_RECOVERY_ATTEMPTS
 from permission import PermissionManager
 from skills import SKILL_REGISTRY
+from errors import auto_compact,backoff_delay
+import time
+
 load_dotenv()
 
 client = Anthropic(
@@ -14,9 +17,11 @@ client = Anthropic(
     base_url=os.environ.get('ANTHROPIC_BASE_URL')
 )
 
-
-
 def build_system_prompt() ->str:
+    """
+    建立系统提示词
+    System Prompt = SYSTEM + Skills + Memory
+    """
     parts = [SYSTEM]
 
     skills_section = "Skills available:\n" + SKILL_REGISTRY.describe_available()
@@ -30,6 +35,9 @@ def build_system_prompt() ->str:
     return "\n\n".join(parts)
 
 def run_subagent(prompt: str) -> str:
+    """
+    使用子代理完成任务Subagent
+    """
     sub_messages = [{"role": "user", "content": prompt}]  # fresh context
     for _ in range(30):  # safety limit
         response = client.messages.create(
@@ -60,6 +68,7 @@ class ToolExecutionResult:
         self.result_dict = result_dict
         self.request_compact = request_compact
         self.compact_focus = compact_focus
+
 
 def tool_execute(block, state: CompactState, perms: PermissionManager) -> ToolExecutionResult:
     """
@@ -101,10 +110,11 @@ def tool_execute(block, state: CompactState, perms: PermissionManager) -> ToolEx
 
     # 打印输出预览
     print(output[:200])
-    
+    persist_out = persist_large_output(block.id, output)
+    print("persist out: ", persist_out)
     # 返回标准结果对象
     return ToolExecutionResult(
-        result_dict={"type": "tool_result", "tool_use_id": block.id, "content": output},
+        result_dict={"type": "tool_result", "tool_use_id": block.id, "content": persist_out},
         request_compact=request_compact,
         compact_focus=compact_focus
     )
@@ -114,21 +124,55 @@ def agent_loop(messages: list, state: CompactState, perms: PermissionManager):
     
     while True:
         # --- 1. 上下文压缩检查 (Pre-flight Check) ---
+        response = None
         messages[:] = micro_compact(messages)
         print("[micro compact]")
         if estimate_tokens(messages) > THRESHOLD:
             print("[auto_compact triggered]")
             messages[:] = compact_history(messages, state, client=client, model=MODEL)
 
-        # --- 2. 调用 LLM ---
-        system = build_system_prompt()
+        for attempt in range(MAX_RECOVERY_ATTEMPTS + 1):
+            try:
+                
+                # --- 2. 调用 LLM ---
+                system = build_system_prompt()
 
-        response = client.messages.create(
-            model=MODEL, system=system, messages=messages,
-            tools=PARENT_TOOLS, max_tokens=8000,
-        )   
+                response = client.messages.create(
+                    model=MODEL, system=system, messages=messages,
+                    tools=PARENT_TOOLS, max_tokens=8000,
+                )
+                break
+
+            except APIError as e:
+                error_body = str(e).lower()
+
+                if "overlong_prompt" in error_body or ("prompt" in error_body and "long" in error_body):
+                    print(f"[Recovery] Prompt too long. Compacting... (attempt {attempt + 1})")
+                    messages[:] = auto_compact(messages)
+                    continue
+                    
+                if attempt < MAX_RECOVERY_ATTEMPTS:
+                    delay = backoff_delay(attempt)
+                    print(f"[Recovery] API error: {e}. "
+                          f"Retrying in {delay:.1f}s (attempt {attempt + 1}/{MAX_RECOVERY_ATTEMPTS})")
+                    time.sleep(delay)
+                    continue
+
+                print(f"[Error] API call failed after {MAX_RECOVERY_ATTEMPTS} retries: {e}")
+                return
+            
+            except (ConnectionError, TimeoutError, OSError) as e:
+                if attempt < MAX_RECOVERY_ATTEMPTS:
+                    delay = backoff_delay(attempt)
+                    print(f"[Recovery] Connection error: {e}. "
+                          f"Retrying in {delay:.1f}s (attempt {attempt + 1}/{MAX_RECOVERY_ATTEMPTS})")
+                    time.sleep(delay)
+                    continue
+                print(f"[Error] Connection failed after {MAX_RECOVERY_ATTEMPTS} retries: {e}")
+                return
+            
         messages.append({"role": "assistant", "content": response.content})
-        
+    
         # --- 3. 检查终止条件 ---
         if response.stop_reason != "tool_use":
             return
@@ -174,7 +218,8 @@ def agent_loop(messages: list, state: CompactState, perms: PermissionManager):
                 # 统计 todo 使用情况
                 if block.name == "todo":
                     used_todo = True
-
+                        
+    
         # --- 5. 更新状态与后续逻辑 ---
         
         # 更新 todo 计数器
@@ -191,6 +236,8 @@ def agent_loop(messages: list, state: CompactState, perms: PermissionManager):
             print("[manual compact]")
             messages[:] = compact_history(messages, state, client=client, model=MODEL, focus=current_compact_focus)
             return
+        break
+    
 
 
 if __name__ == "__main__":

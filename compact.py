@@ -3,13 +3,7 @@ import time
 import json
 from dataclasses import dataclass, field
 
-KEEP_RECENT_TOOL_RESULTS = 3
-PRESERVE_RESULT_TOOLS = {"read_file"}
-WORKDIR = Path.cwd()
-TRANSCRIPT_DIR = WORKDIR / ".transcripts"
-TOOL_RESULTS_DIR = WORKDIR / ".task_outputs" / "tool-results"
-PERSIST_THRESHOLD = 30000
-PREVIEW_CHARS = 2000
+from settings import PERSIST_THRESHOLD,TOOL_RESULTS_DIR,PREVIEW_CHARS,WORKDIR,KEEP_RECENT_TOOL_RESULTS,TRANSCRIPT_DIR
 
 @dataclass
 class CompactState:
@@ -39,7 +33,7 @@ def persist_large_output(tool_use_id: str, output: str) -> str:
     TOOL_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     stored_path = TOOL_RESULTS_DIR / f"{tool_use_id}.txt"
     if not stored_path.exists():
-        stored_path.write_text(output)
+        stored_path.write_text(output,encoding='utf-8')
     preview = output[:PREVIEW_CHARS]
     rel_path = stored_path.relative_to(WORKDIR)
     return (
@@ -79,7 +73,7 @@ def write_transcript(messages: list) -> Path:
     path = TRANSCRIPT_DIR / f"transcript_{int(time.time())}.jsonl"
     with path.open("w") as handle:
         for message in messages:
-            handle.write(json.dumps(message, default=str) + "\n")
+            handle.write(json.dumps(message, default=str, ensure_ascii=False) + "\n")
     return path
 
 def summarize_history(messages: list, client, model) -> str:
@@ -100,6 +94,7 @@ def summarize_history(messages: list, client, model) -> str:
         messages=[{"role": "user", "content": prompt}],
         max_tokens=2000,
     )
+    print("compacted history summary: ", response)
     return response.content[0].text.strip()
 
 def compact_history(messages: list, state: CompactState, client, model, focus: str | None = None,) -> list:
