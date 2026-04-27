@@ -80,6 +80,7 @@ class EthanAgentLoop:
             consolidator=self.consolidator,
             ttl_minutes=self.session_ttl_minutes,
         )
+        self.context_builder = ContextBuilder(workspace)
     def _register_default_tools(self, tools: ToolRegistry) -> None:
         """
         注册默认工具
@@ -149,10 +150,16 @@ class EthanAgentLoop:
         logger.info("Session: {}", session)
 
         history = session.get_history(max_messages=0)
-        initial_messages = self._build_messages(history=history, current_message=query)
-        logger.info("Initial messages: {}", initial_messages)
+
+        messages = self.context_builder.build_messages(
+            history=history,
+            current_messages=query,
+            session_summary=summary,
+            role="user",
+        )
+        logger.info("Initial messages: {}", messages)
         final_content, all_msgs = await self._run_agent_loop(
-            initial_messages,
+            messages,
             session=session,
         )
         
@@ -198,22 +205,22 @@ class EthanAgentLoop:
         messages.append({"role": "user", "content": current_message})
         return messages
 
-    def _maybe_compact_session(self, session: Session) -> None:
-        # Minimal local compaction: keep latest suffix and preserve a short summary.
-        if len(session.messages) <= 80:
-            return
-        dropped = len(session.messages) - 60
-        dropped_messages = session.messages[:dropped]
-        summary_lines = []
-        for msg in dropped_messages[-12:]:
-            role = msg.get("role", "?")
-            content = str(msg.get("content", "")).strip().replace("\n", " ")
-            if content:
-                summary_lines.append(f"{role}: {content[:120]}")
-        if summary_lines:
-            session.metadata["local_summary"] = "\n".join(summary_lines)
-        session.messages = session.messages[dropped:]
-        session.last_compact = 0
+    # def _maybe_compact_session(self, session: Session) -> None:
+    #     # Minimal local compaction: keep latest suffix and preserve a short summary.
+    #     if len(session.messages) <= 80:
+    #         return
+    #     dropped = len(session.messages) - 60
+    #     dropped_messages = session.messages[:dropped]
+    #     summary_lines = []
+    #     for msg in dropped_messages[-12:]:
+    #         role = msg.get("role", "?")
+    #         content = str(msg.get("content", "")).strip().replace("\n", " ")
+    #         if content:
+    #             summary_lines.append(f"{role}: {content[:120]}")
+    #     if summary_lines:
+    #         session.metadata["local_summary"] = "\n".join(summary_lines)
+    #     session.messages = session.messages[dropped:]
+    #     session.last_compact = 0
 
 
 class AgentRunner:
@@ -228,6 +235,7 @@ class AgentRunner:
     async def run(self, spec: AgentRunSpec) -> tuple[str, list[dict[str, Any]]]:
         messages = list(spec.messages)
         final_text = ""
+        usage: dict[str, int] = {"prompt_tokens": 0, "completion_tokens": 0}
 
         for _ in range(spec.max_iterations):
             try:
@@ -235,47 +243,50 @@ class AgentRunner:
             except Exception as e:
                 return f"Error requesting model: {e}", messages
 
-            # Some providers return None content when issuing only tool calls.
-            # Downstream APIs require message.content to be string/list, never null.
             assistant_content = response.content if response.content is not None else ""
             tool_calls = response.tool_calls
+            raw_usage = response.usage
+            self._accumulate_usage(usage, raw_usage)
+            
             logger.info("Response: {}", response)
             logger.info("Tool calls: {}", tool_calls)
-            if tool_calls:
-                content_blocks: list[dict[str, Any]] = []
-                if assistant_content:
-                    content_blocks.append({"type": "text", "text": assistant_content})
-                for call in tool_calls:
-                    content_blocks.append({
-                        "type": "tool_use",
-                        "id": call["id"],
-                        "name": call["name"],
-                        "input": call["input"],
-                    })
-                assistant_message: dict[str, Any] = {"role": "assistant", "content": content_blocks}
-            else:
+
+            #如果有工具调用
+            if not response.should_excute_tools:
                 assistant_message = {"role": "assistant", "content": assistant_content}
                 messages.append(assistant_message)
                 return assistant_content, messages
-            messages.append(assistant_message)            
             
+            content_blocks: list[dict[str, Any]] = []
+            if assistant_content:
+                content_blocks.append({"type": "text", "text": assistant_content})
+            for call in tool_calls:
+                content_blocks.append({
+                    "type": "tool_use",
+                    "id": call["id"],
+                    "name": call["name"],
+                    "input": call["input"],
+                })
+            assistant_message: dict[str, Any] = {"role": "assistant", "content": content_blocks}
+            
+            messages.append(assistant_message)
+
+            tool_results, fatal_error = await self._execute_tools(
+                spec,
+                tool_calls = tool_calls,
+            )
             tool_result_blocks: list[dict[str, Any]] = []
-            for call in tool_calls or []:
-                tool_name = call["name"]
-                tool_input = call["input"]
-                tool_call_id = call["id"]
-                result = await spec.tools.execute(tool_name, tool_input)
-                tool_result = str(result)
-                logger.info("Tool result: {}", tool_result)
+            for tool_call, result in zip(tool_calls, tool_results):
                 tool_result_blocks.append({
                     "type": "tool_result",
-                    "tool_use_id": tool_call_id,
-                    "content": tool_result,
+                    "tool_use_id": tool_call["id"],
+                    "content": result,
                 })
-
             if tool_result_blocks:
+                logger.info("Tool results: {}", tool_result_blocks)
                 messages.append({"role": "user", "content": tool_result_blocks})
-
+            if fatal_error is not None:
+                logger.error("Fatal error: {}", fatal_error)
         return f"Reached max_iterations={spec.max_iterations} without final answer.", messages
 
     async def _request_model(
@@ -283,7 +294,7 @@ class AgentRunner:
         spec: AgentRunSpec,
         messages: list[dict[str, Any]],
     )->LLMResponse:
-        kwargs =  self._build_request_kwargs(spec, messages, tools=spec.tools.get_definitions())
+        kwargs = self._build_request_kwargs(spec, messages, tools=spec.tools.get_definitions())
         return await self.provider.chat(**kwargs)
 
     def _build_request_kwargs(
@@ -302,8 +313,79 @@ class AgentRunner:
         if spec.max_tokens is not None:
             kwargs["max_tokens"] = spec.max_tokens
         return kwargs
+    
+    async def _execute_tools(
+        self,
+        spec: AgentRunSpec,
+        tool_calls: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        # 根据可并行性进行分批
+        batches = self._partition_tool_batches(spec, tool_calls)
+        
+        tool_results: list[tuple[Any, BaseException | None]] = []
+        for batch in batches:
+            if len(batch) > 1:
+                tool_results.extend(await asyncio.gather(
+                    *(self._run_tool(spec, tool_call) for tool_call in batch)
+                ))
+            else:
+                tool_results.append(await self._run_tool(spec, batch[0]))
+
+        results: list[Any] = []
+        fatal_error: BaseException | None = None
+        for result, error in tool_results:
+            results.append(result)
+            if error is not None and fatal_error is None:
+                fatal_error = error
+        return results, fatal_error
 
 
+
+    async def _run_tool(self, spec: AgentRunSpec, tool_call: dict[str, Any]) -> tuple[Any, BaseException | None]:
+        prepare_before_call = getattr(spec.tools, "prepare_before_call", None)
+        if callable(prepare_before_call):
+            tool, params, error = prepare_before_call(tool_call["name"], tool_call["input"])
+            result = None
+        try:
+            if tool is not None and error is None:
+                result = await tool.run(**params)
+            else:
+                result = await spec.tools.execute(tool_call["name"], tool_call["input"])
+        except Exception as e:
+            return f"Error running tool: {e}", e
+
+        tool_result = "(empty)" if result is None else str(result)
+        return tool_result, None
+
+    def _accumulate_usage(self, usage: dict[str, int], raw_usage: dict[str, int]) -> None:
+        for key, value in raw_usage.items():
+            usage[key] = usage.get(key, 0) + value
+
+    
+    def _partition_tool_batches(
+        self,
+        spec: AgentRunSpec,
+        tool_calls: list[dict[str, Any]],
+    ) -> list[list[dict[str, Any]]]:
+        # if not spec.concurrent_tools:
+        #     return [[tool_call] for tool_call in tool_calls]
+
+        batches: list[list[dict[str, Any]]] = []
+        current: list[dict[str, Any]] = []
+        for tool_call in tool_calls:
+            get_tool = getattr(spec.tools, "get", None)
+            tool = get_tool(tool_call["name"]) if callable(get_tool) else None
+            can_batch = bool(tool and tool.concurrency_safe)
+            if can_batch:
+                current.append(tool_call)
+                continue
+            if current:
+                batches.append(current)
+                current = []
+            batches.append([tool_call])
+        if current:
+            batches.append(current)
+        return batches
 
 
 if __name__ == "__main__":

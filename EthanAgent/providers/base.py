@@ -4,6 +4,9 @@ from tkinter import ANCHOR
 from typing import Any
 from dataclasses import dataclass, field
 
+from anthropic.types import content_block
+from loguru import logger
+
 @dataclass
 class LLMResponse:
     content: str | None
@@ -44,7 +47,7 @@ class LLMProvider(ABC):
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
         model: str | None = None,
-        max_tokens: int = 4096,
+        max_tokens: int = 10000,
         temperature: float = 0.7,
     ) -> LLMResponse:
         raise NotImplementedError("Subclasses must implement this method")
@@ -75,17 +78,42 @@ class AnthropicProvider(LLMProvider):
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
         model: str | None = None,
-        max_tokens: int = 4096,
+        max_tokens: int = 10000,
         temperature: float = 0.7,
     )->LLMResponse:
+
+        system, anthropic_msgs = self._convert_messages(messages)
+        
         response = await self._client.messages.create(
             model=model or self.default_model, 
-            messages=messages,
+            messages=anthropic_msgs,
             tools=tools, 
+            system=system,
             max_tokens=max_tokens,
             temperature=temperature,
         )
         return self._parse_response(response)
+
+    def _convert_messages(self, messages: list[dict[str, Any]]) -> tuple[str, list[dict[str, Any]]]:
+        system: str | list[dict[str, Any]] = ""
+        raw: list[dict[str, Any]] = []
+
+        for msg in messages:
+            role = msg.get("role", "")
+            content = msg.get("content")
+
+            if role == "system":
+                system = content if isinstance(content, (str, list)) else str(content or "")
+                continue
+
+            else:
+                raw.append({
+                    "role": role,
+                    "content": content,
+                })
+
+        return system, raw
+
 
     def _parse_response(self, response: Any) -> LLMResponse:
         """
