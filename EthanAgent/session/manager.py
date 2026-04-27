@@ -7,7 +7,7 @@ import json
 @dataclass
 class Session:
     key: str
-    messages: list[dict[str, Any]]
+    messages: list[dict[str, Any]] = field(default_factory=list)
     created_at: datetime = field(default_factory=datetime.now)
     updated_at: datetime = field(default_factory=datetime.now)
     last_compact: int = 0 # 已经压缩的消息数量

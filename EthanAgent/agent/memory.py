@@ -73,7 +73,7 @@ class Consolidator:
         provider: LLMProvider,
         model: str,
         sessions: SessionManager,
-        build_messages: Callable[..., list[dict[str, Any]]],
+        # build_messages: Callable[..., list[dict[str, Any]]],
         get_tool_definitions: Callable[[], list[dict[str, Any]]],
         context_window_tokens: int = 4096,
     ):
@@ -82,7 +82,7 @@ class Consolidator:
         self.model = model
         self.sessions = sessions
         self.context_window_tokens = context_window_tokens
-        self.build_messages = build_messages
+        # self.build_messages = build_messages 
         self.get_tool_definitions = get_tool_definitions
         self._locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
 
@@ -107,7 +107,6 @@ class Consolidator:
         """
         将消息通过LLM提炼成摘要，并保存到history.jsonl
         """
-        
         if not messages:
             return None
         try:
@@ -135,7 +134,17 @@ class Consolidator:
             self.store.raw_archive(messages)
             return None
 
+    # async def maybe_consolidate_by_tokens(
+    #     self,
+    #     session: Session,
+    #     session_summary: str | None = None
+    # ):
+    #     if not session.messages or self.context_window_tokens <= 0:
+    #         return
 
+    #     lock = self.get_lock(session.key)
+    #     async with lock:
+    #         budget = self.context_window_tokens
 
 class Dream:
     pass

@@ -22,7 +22,7 @@ from uuid import uuid4
 from loguru import logger
 import os
 import dotenv
-
+import json
 dotenv.load_dotenv()
 
 class AgentRunSpec(BaseModel):
@@ -68,6 +68,18 @@ class EthanAgentLoop:
         self.sessions = SessionManager(workspace)
         self.session_ttl_minutes = session_ttl_minutes
 
+        self.consolidator = Consolidator(
+            store=MemoryStore(workspace),
+            provider=self.provider,
+            model=self.model,
+            sessions=self.sessions,
+            get_tool_definitions=self.tools.get_definitions,
+        )
+        self.compactor = Compactor(
+            sessions=self.sessions,
+            consolidator=self.consolidator,
+            ttl_minutes=self.session_ttl_minutes,
+        )
     def _register_default_tools(self, tools: ToolRegistry) -> None:
         """
         注册默认工具
@@ -128,15 +140,23 @@ class EthanAgentLoop:
 
         key = session_key
         session = self.sessions.get_or_create(key)
-        self._maybe_compact_session(session)
+        
+        session, summary = self.compactor.prepare_session(session, key)
+        # await self.consolidator.maybe_consolidate_by_tokens(
+        #     session,
+        #     session_summary=summary,
+        # )
+        logger.info("Session: {}", session)
+
         history = session.get_history(max_messages=0)
         initial_messages = self._build_messages(history=history, current_message=query)
-
+        logger.info("Initial messages: {}", initial_messages)
         final_content, all_msgs = await self._run_agent_loop(
             initial_messages,
             session=session,
         )
-        self._save_turn(session, all_msgs, skip=len(history))
+        
+        # self._save_turn(session, all_msgs, skip=len(history))
         return final_content
 
     async def _run_agent_loop(
@@ -215,34 +235,46 @@ class AgentRunner:
             except Exception as e:
                 return f"Error requesting model: {e}", messages
 
-            assistant_content, tool_calls = self._parse_response(response)
-            assistant_message: dict[str, Any] = {"role": "assistant", "content": assistant_content}
+            # Some providers return None content when issuing only tool calls.
+            # Downstream APIs require message.content to be string/list, never null.
+            assistant_content = response.content if response.content is not None else ""
+            tool_calls = response.tool_calls
+            logger.info("Response: {}", response)
+            logger.info("Tool calls: {}", tool_calls)
             if tool_calls:
-                assistant_message["tool_calls"] = tool_calls
-            messages.append(assistant_message)
-
-            if not tool_calls:
-                final_text = assistant_content.strip() or "(empty response)"
-                return final_text, messages
-
-            for call in tool_calls:
+                content_blocks: list[dict[str, Any]] = []
+                if assistant_content:
+                    content_blocks.append({"type": "text", "text": assistant_content})
+                for call in tool_calls:
+                    content_blocks.append({
+                        "type": "tool_use",
+                        "id": call["id"],
+                        "name": call["name"],
+                        "input": call["input"],
+                    })
+                assistant_message: dict[str, Any] = {"role": "assistant", "content": content_blocks}
+            else:
+                assistant_message = {"role": "assistant", "content": assistant_content}
+                messages.append(assistant_message)
+                return assistant_content, messages
+            messages.append(assistant_message)            
+            
+            tool_result_blocks: list[dict[str, Any]] = []
+            for call in tool_calls or []:
                 tool_name = call["name"]
                 tool_input = call["input"]
                 tool_call_id = call["id"]
                 result = await spec.tools.execute(tool_name, tool_input)
                 tool_result = str(result)
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "tool_result",
-                                "tool_use_id": tool_call_id,
-                                "content": tool_result,
-                            }
-                        ],
-                    }
-                )
+                logger.info("Tool result: {}", tool_result)
+                tool_result_blocks.append({
+                    "type": "tool_result",
+                    "tool_use_id": tool_call_id,
+                    "content": tool_result,
+                })
+
+            if tool_result_blocks:
+                messages.append({"role": "user", "content": tool_result_blocks})
 
         return f"Reached max_iterations={spec.max_iterations} without final answer.", messages
 
@@ -253,27 +285,6 @@ class AgentRunner:
     )->LLMResponse:
         kwargs =  self._build_request_kwargs(spec, messages, tools=spec.tools.get_definitions())
         return await self.provider.chat(**kwargs)
-
-    def _parse_response(self, response: Any) -> tuple[str, list[dict[str, Any]]]:
-        content = getattr(response, "content", "")
-        if isinstance(content, str):
-            return content, []
-
-        text_parts: list[str] = []
-        tool_calls: list[dict[str, Any]] = []
-        for block in content or []:
-            block_type = getattr(block, "type", None)
-            if block_type == "text":
-                text_parts.append(getattr(block, "text", ""))
-            elif block_type == "tool_use":
-                tool_calls.append(
-                    {
-                        "id": getattr(block, "id", ""),
-                        "name": getattr(block, "name", ""),
-                        "input": getattr(block, "input", {}) or {},
-                    }
-                )
-        return "\n".join([x for x in text_parts if x]).strip(), tool_calls
 
     def _build_request_kwargs(
         self,
