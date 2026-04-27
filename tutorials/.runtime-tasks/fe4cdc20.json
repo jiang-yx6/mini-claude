@@ -1,0 +1,10 @@
+{
+  "id": "fe4cdc20",
+  "status": "completed",
+  "result": "'sleep' 不是内部或外部命令，也不是可运行的程序\n或批处理文件。",
+  "command": "sleep 120 && echo \"该喝水了！请起身喝杯水，保持身体水分充足。\"",
+  "started_at": 1777035748.8539164,
+  "finished_at": 1777035748.8748915,
+  "result_preview": "'sleep' 不是内部或外部命令，也不是可运行的程序 或批处理文件。",
+  "output_file": ".runtime-tasks\\fe4cdc20.log"
+}

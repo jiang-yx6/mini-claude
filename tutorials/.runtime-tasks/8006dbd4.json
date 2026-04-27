@@ -1,0 +1,10 @@
+{
+  "id": "8006dbd4",
+  "status": "running",
+  "result": null,
+  "command": "python -c \"import time; time.sleep(120); print('该喝水了！请起身喝杯水，保持身体水分充足。')\"",
+  "started_at": 1777035803.5078852,
+  "finished_at": null,
+  "result_preview": "",
+  "output_file": ".runtime-tasks\\8006dbd4.log"
+}

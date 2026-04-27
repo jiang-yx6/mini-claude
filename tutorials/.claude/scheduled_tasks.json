@@ -1,0 +1,18 @@
+[
+  {
+    "id": "c9518787",
+    "cron": "7 21 * * *",
+    "prompt": "\u3010\u5403\u836f\u63d0\u9192\u3011\u65f6\u95f4\u5230\u4e86\uff01\u8be5\u5403\u836f\u4e86\uff01\u8bf7\u8bb0\u5f97\u6309\u65f6\u670d\u836f\u3002",
+    "recurring": false,
+    "durable": true,
+    "createdAt": 1777035905.6149375
+  },
+  {
+    "id": "17e80563",
+    "cron": "7 21 * * *",
+    "prompt": "\u23f0 \u65f6\u95f4\u5230\u4e86\uff01\u8be5\u53bb\u5403\u996d\u4e86\uff01\ud83c\udf5a \u522b\u5199\u4ee3\u7801\u4e86\uff0c\u5feb\u53bb\u5403\u996d\uff01",
+    "recurring": false,
+    "durable": true,
+    "createdAt": 1777035957.1767662
+  }
+]
