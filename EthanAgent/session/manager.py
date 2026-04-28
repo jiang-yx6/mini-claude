@@ -3,6 +3,7 @@ from typing import Any
 from datetime import datetime
 from pathlib import Path
 import json
+import re
 
 @dataclass
 class Session:
@@ -20,8 +21,8 @@ class Session:
         msg = {
             "role" : role,
             "content" :content,
-            "timestamp" : datetime.now().isoformat()
-            **kwargs
+            "timestamp" : datetime.now().isoformat(),
+            **kwargs,
         }
         self.messages.append(msg)
         self.updated_at = datetime.now()
@@ -84,6 +85,23 @@ class SessionManager:
         self.sessions_dir = ensure_dir(self.workspace / "sessions")
         self.sessions: dict[str, Session] = {}
 
+    @staticmethod
+    def _safe_key_filename(key: str) -> str:
+        """
+        Map a session key (e.g. 'cli:direct') to a filesystem-safe filename stem.
+        Windows forbids characters like ':' in filenames.
+        """
+        if not isinstance(key, str) or not key:
+            return "default"
+        # Replace common separators and illegal filename characters.
+        safe = key.replace(":", "_").replace("/", "_").replace("\\", "_")
+        safe = re.sub(r'[<>:"/\\\\|?*]+', "_", safe)
+        safe = safe.strip(" ._")
+        return safe or "default"
+
+    def _session_path(self, key: str) -> Path:
+        return self.sessions_dir / f"{self._safe_key_filename(key)}.jsonl"
+
     def get_or_create(self, key: str) -> Session:
         if key in self.sessions:
             return self.sessions[key]
@@ -96,9 +114,13 @@ class SessionManager:
         return session
 
     def _load(self, key: str) -> Session:
-        path = self.sessions_dir / f"{key}.jsonl"
+        path = self._session_path(key)
         if not path.exists():
-            return None
+            # Back-compat: older code may have written unsafe names (or on non-Windows).
+            legacy = self.sessions_dir / f"{key}.jsonl"
+            if not legacy.exists():
+                return None
+            path = legacy
         
         try:
             messages = []
@@ -138,7 +160,7 @@ class SessionManager:
     
     def save(self, session: Session) -> None:
         # 保存session
-        path = self.sessions_dir / f"{session.key}.jsonl"
+        path = self._session_path(session.key)
 
         with open(path, "w", encoding="utf-8") as f:
             metadata_line = {

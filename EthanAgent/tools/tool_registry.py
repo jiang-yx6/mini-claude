@@ -51,10 +51,8 @@ class ToolRegistry:
         """
         # 如果读写文件参数不是字典,则返回错误
         if not isinstance(params, dict) and name in ('write_file', 'read_file'):
-            return None, params, (
-                f"Error: Tool '{name}' parameters must be a JSON object, got {type(params).__name__}. "
-                "Use named parameters: tool_name(param1=\"value1\", param2=\"value2\")"
-            )
+            return None, params,f"Error: Tool '{name}' parameters must be a JSON object, got {type(params).__name__}. Use named parameters: tool_name(param1=\"value1\", param2=\"value2\")"
+    
 
         #获取工具
         tool = self._tools.get(name)

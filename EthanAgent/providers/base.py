@@ -95,6 +95,9 @@ class AnthropicProvider(LLMProvider):
         return self._parse_response(response)
 
     def _convert_messages(self, messages: list[dict[str, Any]]) -> tuple[str, list[dict[str, Any]]]:
+        """
+        将system和messages分开
+        """
         system: str | list[dict[str, Any]] = ""
         raw: list[dict[str, Any]] = []
 

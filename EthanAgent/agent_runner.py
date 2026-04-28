@@ -1,3 +1,4 @@
+from math import log
 from unittest import result
 from pydantic import BaseModel, ConfigDict
 from tools.base import Tool
@@ -5,12 +6,12 @@ from pathlib import Path
 import asyncio 
 
 from tools.tool_registry import ToolRegistry
-from typing import Any, Callable
+from typing import Any, Callable, final
 from pathlib import Path
 from agent.context import ContextBuilder
 from agent.memory import Consolidator, MemoryStore
 from agent.compact import Compactor
-
+from utils.runtime import build_length_recovery_message
 from tools.file import ReadFileTool, WriteFileTool, EditFileTool, ListDirTool
 from tools.shell import ShellTool
 from tools.tool_registry import ToolRegistry
@@ -25,6 +26,9 @@ import dotenv
 import json
 dotenv.load_dotenv()
 
+_MAX_LENGTH_RECOVERIES = 3
+
+
 class AgentRunSpec(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
     messages: list[dict[str, Any]]
@@ -35,6 +39,7 @@ class AgentRunSpec(BaseModel):
     max_tokens: int | None = None
     temperature: float | None = None    
 
+    checkpoint_callback: Callable[[dict[str, Any]], None]
 
 class EthanAgentLoop:   
     def __init__(
@@ -150,6 +155,7 @@ class EthanAgentLoop:
         logger.info("Session: {}", session)
 
         history = session.get_history(max_messages=0)
+        logger.info("History: {}", history)
 
         messages = self.context_builder.build_messages(
             history=history,
@@ -157,23 +163,39 @@ class EthanAgentLoop:
             session_summary=summary,
             role="user",
         )
-        logger.info("Initial messages: {}", messages)
-        final_content, all_msgs = await self._run_agent_loop(
+        final_content, all_msgs , _ = await self._run_agent_loop(
             messages,
             session=session,
         )
-        
-        # self._save_turn(session, all_msgs, skip=len(history))
+
+        self._save_turn(session, all_msgs, skip=len(history) + 1)
         return final_content
 
     async def _run_agent_loop(
         self,
         messages: list[dict[str, Any]],
         session: Session,
-    ) -> tuple[str, list[dict[str, Any]]]:
+    ) -> tuple[str, list[dict[str, Any]], str]:
         """
         消息流程 4 : 运行AgentRunner
         """
+        # 设置cehckpoint回调，保存session消息，以便恢复中断的对话
+        async def _checkpoint(payload: dict[str, Any]) -> None:
+            """
+            payload: dict[str, Any] = {
+                "assistant_message": {
+                    "role": "assistant",
+                    "content": assistant_content,
+                },
+                "completed_tool_results": tool_results,
+                "pending_tool_calls": tool_calls,
+            }
+            快照包括AI的响应，完成的工具调用结果，未完成的工具调用
+            """
+            if session is None:
+                return
+            self._set_runtime_checkpoint(session, payload)
+
         result = await self.runner.run(AgentRunSpec(
             messages=messages,
             tools=self.tools,
@@ -182,8 +204,14 @@ class EthanAgentLoop:
             max_iterations=self.max_iterations,
             max_tokens=self.max_tokens,
             temperature=self.temperature,
+            checkpoint_callback=_checkpoint,
         ))
-        return result
+
+        final_text = result.get("final_text")
+        messages = result.get("messages")
+        stop_reason = result.get("stop_reason")
+
+        return final_text, messages, stop_reason
 
     def _save_turn(self, session: Session, messages: list[dict[str, Any]], skip: int) -> None:
         for message in messages[skip:]:
@@ -205,6 +233,10 @@ class EthanAgentLoop:
         messages.append({"role": "user", "content": current_message})
         return messages
 
+    def _set_runtime_checkpoint(self, session: Session, payload: dict):
+        session.metadata["runtime_checkpoint"] = payload
+        self.sessions.save(session)
+    
     # def _maybe_compact_session(self, session: Session) -> None:
     #     # Minimal local compaction: keep latest suffix and preserve a short summary.
     #     if len(session.messages) <= 80:
@@ -232,12 +264,16 @@ class AgentRunner:
         ):
         self.provider = provider
 
-    async def run(self, spec: AgentRunSpec) -> tuple[str, list[dict[str, Any]]]:
+    async def run(self, spec: AgentRunSpec) -> dict[str, Any]:
         messages = list(spec.messages)
-        final_text = ""
+        final_text: str | None = None
+        error: str | None = None
+        tool_events: list[dict[str, str]] = []
+        stop_reason: str = "completed"
         usage: dict[str, int] = {"prompt_tokens": 0, "completion_tokens": 0}
+        length_recovery_count = 0
 
-        for _ in range(spec.max_iterations):
+        for iteration in range(spec.max_iterations):
             try:
                 response = await self._request_model(spec, messages)
             except Exception as e:
@@ -248,46 +284,121 @@ class AgentRunner:
             raw_usage = response.usage
             self._accumulate_usage(usage, raw_usage)
             
-            logger.info("Response: {}", response)
-            logger.info("Tool calls: {}", tool_calls)
+            logger.info("Response: {}", assistant_content[:50])
+            logger.info("Tool calls: {}", tool_calls[:50])
 
             #如果有工具调用
-            if not response.should_excute_tools:
+            if  response.should_excute_tools:
+                content_blocks: list[dict[str, Any]] = []
+                if assistant_content:
+                    content_blocks.append({"type": "text", "text": assistant_content})
+                for call in tool_calls:
+                    content_blocks.append({
+                        "type": "tool_use",
+                        "id": call.get("id"),
+                        "name": call.get("name", ""),
+                        "input": call.get("input", {}) if isinstance(call.get("input"), dict) else {},
+                    })
+                assistant_message: dict[str, Any] = {"role": "assistant", "content": content_blocks}
+                
+                await self._emit_checkpoint(spec.checkpoint_callback, payload={
+                    "phase": "awaiting_tools",
+                    "iteration": iteration,
+                    "model": spec.model,
+                    "assistant_message": assistant_message,
+                    "completed_tool_results": [],
+                    "pending_tool_calls": tool_calls,
+                })
+
+                messages.append(assistant_message)
+
+                tool_results, new_events, fatal_error = await self._execute_tools(
+                    spec,
+                    tool_calls = tool_calls,
+                )
+                tool_events.extend(new_events)
+
+                tool_result_blocks: list[dict[str, Any]] = []
+                for tool_call, tool_results in zip(tool_calls, tool_results):
+                    tool_result_blocks.append({
+                        "type": "tool_result",
+                        "tool_use_id": tool_call["id"],
+                        "content": tool_results,
+                    })
+                if tool_result_blocks:
+                    logger.info(f"Tool results({len(tool_result_blocks)}): {tool_result_blocks[0]['content'][:50]}")
+                    messages.append({"role": "user", "content": tool_result_blocks})
+                if fatal_error is not None:
+                    logger.error("Fatal error: {}", fatal_error)
+                    error = f"Error: {type(fatal_error).__name__}: {fatal_error}"
+                    final_text = error
+                    messages.append({"role": "assistant", "content": final_text})
+                    # stop_reason = "tool_error"
+                    break
+
+                await self._emit_checkpoint(spec.checkpoint_callback, payload={
+                    "phase": "tools_completed",
+                    "iteration": iteration,
+                    "model": spec.model,
+                    "assistant_message": assistant_message,
+                    "completed_tool_results": tool_result_blocks,
+                    "pending_tool_calls": [],
+                })
+                continue
+
+            else: #没有工具调用
+
+                #如果Token超出限制，则重试
+                if response.finish_reason == "length":
+                    length_recovery_count += 1
+                    if length_recovery_count <= _MAX_LENGTH_RECOVERIES:
+                        logger.info("Output truncated on turn {} for {} ({}/{}); continuing", iteration, spec.model, length_recovery_count, _MAX_LENGTH_RECOVERIES)
+                        messages.append()
+                    assistant_message = {"role": "assistant", "content": assistant_content}
+                    messages.append(assistant_message)
+                    messages.append(build_length_recovery_message())
+                    continue
+                
                 assistant_message = {"role": "assistant", "content": assistant_content}
                 messages.append(assistant_message)
-                return assistant_content, messages
-            
-            content_blocks: list[dict[str, Any]] = []
-            if assistant_content:
-                content_blocks.append({"type": "text", "text": assistant_content})
-            for call in tool_calls:
-                content_blocks.append({
-                    "type": "tool_use",
-                    "id": call["id"],
-                    "name": call["name"],
-                    "input": call["input"],
+                await self._emit_checkpoint(spec.checkpoint_callback, payload={
+                    "phase": "final_response",
+                    "iteration": iteration,
+                    "model": spec.model,
+                    "assistant_message": assistant_message,
+                    "completed_tool_results": [],
+                    "pending_tool_calls": [],
                 })
-            assistant_message: dict[str, Any] = {"role": "assistant", "content": content_blocks}
-            
-            messages.append(assistant_message)
 
-            tool_results, fatal_error = await self._execute_tools(
-                spec,
-                tool_calls = tool_calls,
-            )
-            tool_result_blocks: list[dict[str, Any]] = []
-            for tool_call, result in zip(tool_calls, tool_results):
-                tool_result_blocks.append({
-                    "type": "tool_result",
-                    "tool_use_id": tool_call["id"],
-                    "content": result,
-                })
-            if tool_result_blocks:
-                logger.info("Tool results: {}", tool_result_blocks)
-                messages.append({"role": "user", "content": tool_result_blocks})
-            if fatal_error is not None:
-                logger.error("Fatal error: {}", fatal_error)
-        return f"Reached max_iterations={spec.max_iterations} without final answer.", messages
+                final_text = assistant_content
+                break
+
+        else:
+            # Only runs when the loop did NOT break (i.e. we exhausted max_iterations).
+            stop_reason = "max_iterations"
+            messages.append({
+                "role": "assistant",
+                "content": "I reached the maximum number of tool call iterations ({}) without completing the task. You can try breaking the task into smaller steps.".format(spec.max_iterations),
+            })
+
+        return {
+            "final_text": final_text,
+            "messages": messages,
+            "stop_reason": stop_reason,
+            "usage": usage,
+            "tool_events": tool_events,
+            "error": error,
+        }
+
+    # def _drop_orphan_tool_results(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    #     declared: set[str] = set()
+    #     updated: list[dict[str, Any]] | None = None
+
+    #     for idx, msg in enumerate(messages):
+    #         role = msg.get("role")
+    #         if role == ""
+
+
 
     async def _request_model(
         self,
@@ -332,30 +443,48 @@ class AgentRunner:
                 tool_results.append(await self._run_tool(spec, batch[0]))
 
         results: list[Any] = []
+        events: list[dict[str, str]] = []
         fatal_error: BaseException | None = None
-        for result, error in tool_results:
+        for result, event, error in tool_results:
             results.append(result)
+            events.append(event)
             if error is not None and fatal_error is None:
                 fatal_error = error
-        return results, fatal_error
+        return results, events, fatal_error
 
 
 
     async def _run_tool(self, spec: AgentRunSpec, tool_call: dict[str, Any]) -> tuple[Any, BaseException | None]:
         prepare_before_call = getattr(spec.tools, "prepare_before_call", None)
+        tool, params, error = None, None, None
         if callable(prepare_before_call):
-            tool, params, error = prepare_before_call(tool_call["name"], tool_call["input"])
-            result = None
+            try:
+                tool, params, error = prepare_before_call(tool_call["name"], tool_call["input"])
+            except Exception as e:
+                pass
+        if error:
+            event = {
+                "name": tool_call["name"],
+                "status": "error",
+                "detail": error.split(": ", 1)[-1][:120],
+            }
+            return error, event, RuntimeError(error)
+
         try:
-            if tool is not None and error is None:
+            if tool is not None:
                 result = await tool.run(**params)
             else:
-                result = await spec.tools.execute(tool_call["name"], tool_call["input"])
-        except Exception as e:
-            return f"Error running tool: {e}", e
+                result = await spec.tools.execute(tool_call["name"], tool_call["input"])        
+        except BaseException as e:
+            event = {
+                "name": tool_call["name"],
+                "status": "error",
+                "detail": str(e),
+            }
+            return error, event, RuntimeError(error)
 
         tool_result = "(empty)" if result is None else str(result)
-        return tool_result, None
+        return tool_result, {"name": tool_call["name"], "status": "ok", "detail": tool_result[:120] + "..." if len(tool_result) > 120 else tool_result}, None
 
     def _accumulate_usage(self, usage: dict[str, int], raw_usage: dict[str, int]) -> None:
         for key, value in raw_usage.items():
@@ -387,6 +516,13 @@ class AgentRunner:
             batches.append(current)
         return batches
 
+    async def _emit_checkpoint(
+        self,
+        checkpoint_callback: Callable[[dict[str, Any]], None],
+        payload: dict[str, Any],
+    ) -> None:
+        if checkpoint_callback is not None:
+            await checkpoint_callback(payload)
 
 if __name__ == "__main__":
     api_key = os.getenv("ANTHROPIC_API_KEY") or os.getenv("DEEPSEEK_API_KEY")
