@@ -1,0 +1,44 @@
+{
+  "tools": {
+    "mcpServers": {
+      "fs": {
+        "enabled": true,
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-filesystem", "."],
+        "enabledTools": [
+          "read_file",
+          "write_file",
+          "edit_file",
+          "list_directory",
+          "get_file_info",
+          "list_allowed_directories"
+        ],
+        "toolTimeout": 60
+      },
+      "amap-mcp-server": {
+        "enabled": true,
+        "command": "uvx",
+        "args": [
+            "amap-mcp-server"
+        ],
+        "env": {
+            "AMAP_MAPS_API_KEY": "a89f86feb0ba4c835ae815859970ca22"
+        },
+        "enabledTools": [
+          "*"
+        ]
+      },
+      "12306-mcp": {
+        "enabled": true,
+        "command": "npx",
+        "args": [
+            "-y",
+            "12306-mcp"
+        ],
+        "enabledTools": [
+          "*"
+        ]
+      }
+    }
+  }
+}

@@ -10,7 +10,7 @@ class Compactor:
         self, 
         sessions: SessionManager, 
         consolidator: Consolidator, 
-        ttl_minutes: int = 30
+        ttl_minutes: int = 10
     ):
         self.ttl_minutes = ttl_minutes
         self.sessions = sessions
@@ -39,15 +39,16 @@ class Compactor:
         schedule_background: 调度后台任务
         active_session_keys: 活跃的Session列表
         """
-        now = datetime.now()
-        for session_id, session in self.sessions.items():
-            if not session_id or session_id in self._archiving:
+        now = datetime.now() 
+        for session_info in self.sessions.list_sessions():
+            session_key = session_info.get("key", "")
+            if not session_key or session_key in self._archiving:
                 continue
-            if session_id in active_session_keys:
+            if session_key in active_session_keys:
                 continue
-            if self._is_expired(session.get("updated_at"), now):
-                self._archiving.add(session_id)
-                schedule_background(self._archive(session_id))
+            if self._is_expired(session_info.get("updated_at"), now):
+                self._archiving.add(session_key)
+                schedule_background(self._archive(session_key))
         
     
     async def _archive(self, session_id: str) -> None:
@@ -120,7 +121,7 @@ class Compactor:
             session.metadata.pop("_last_summary", None)
             return session,self._format_summary(entry[0], entry[1])
         if "_last_summary" in session.metadata:
-            meta = session.metadata.pop("_last_summary")
+            meta = session.metadata.pop("_last_summary")            
             self.sessions.save(session)
             return session,self._format_summary(meta["text"], datetime.fromisoformat(meta["last_active"]))
         return session, None

@@ -444,6 +444,7 @@ class AgentLoop:
         )
 
         async def _checkpoint(payload: dict[str, Any]) -> None:
+            
             if session is None:
                 return
             self._set_runtime_checkpoint(session, payload)

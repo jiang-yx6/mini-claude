@@ -729,7 +729,7 @@ def _run_gateway(
 
         async def _silent(*_args, **_kwargs):
             pass
-
+ 
         try:
             resp = await agent.process_direct(
                 reminder_note,

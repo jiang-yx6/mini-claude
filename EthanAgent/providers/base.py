@@ -1,10 +1,7 @@
 from abc import ABC, abstractmethod
-from ast import UAdd
-from tkinter import ANCHOR
 from typing import Any
 from dataclasses import dataclass, field
 
-from anthropic.types import content_block
 from loguru import logger
 
 @dataclass
@@ -20,7 +17,7 @@ class LLMResponse:
         return len(self.tool_calls) > 0
 
     @property
-    def should_excute_tools(self) -> bool:
+    def should_execute_tools(self) -> bool:
         """
         finish_reason / stop_reason
         Anthropic: 使用tool_use表示工具调用,使用end_turn表示完成
@@ -83,7 +80,6 @@ class AnthropicProvider(LLMProvider):
     )->LLMResponse:
 
         system, anthropic_msgs = self._convert_messages(messages)
-        
         response = await self._client.messages.create(
             model=model or self.default_model, 
             messages=anthropic_msgs,
@@ -92,6 +88,17 @@ class AnthropicProvider(LLMProvider):
             max_tokens=max_tokens,
             temperature=temperature,
         )
+        if response is None:
+            logger.error(
+                "Anthropic messages.create returned None (model={})",
+                model or self.default_model,
+            )
+            return LLMResponse(
+                content=None,
+                tool_calls=[],
+                finish_reason="error",
+                usage={},
+            )
         return self._parse_response(response)
 
     def _convert_messages(self, messages: list[dict[str, Any]]) -> tuple[str, list[dict[str, Any]]]:
@@ -148,9 +155,19 @@ class AnthropicProvider(LLMProvider):
             }
         }
         """
+        if response is None:
+            logger.error("Anthropic _parse_response received None")
+            return LLMResponse(
+                content=None,
+                tool_calls=[],
+                finish_reason="error",
+                usage={},
+            )
+
+        blocks = getattr(response, "content", None) or []
         content_parts: list[str] = []
         tool_calls: list[dict[str, Any]] = []
-        for block in response.content:
+        for block in blocks:
             if block.type == "text":
                 content_parts.append(block.text)
             elif block.type == "tool_use":

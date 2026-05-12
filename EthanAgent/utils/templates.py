@@ -28,3 +28,4 @@ def _environment() -> Environment:
 def  render_template(name: str, *, strip: bool = False, **kwargs: Any) -> str:
     text = _environment().get_template(name).render(**kwargs)
     return text.rstrip() if strip else text
+
