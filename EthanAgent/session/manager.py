@@ -151,7 +151,7 @@ def ensure_dir(path: Path) -> Path:
 class SessionManager:
     def __init__(self, workspace: Path):
         self.workspace = workspace
-        self.sessions_dir = ensure_dir(self.workspace / "sessions")
+        self.sessions_dir = ensure_dir(self.workspace / ".sessions")
         self.sessions: dict[str, Session] = {}
 
     @staticmethod

@@ -52,7 +52,7 @@ class MemoryStore:
 
     def __init__(self, workspace: Path):
         self.workspace = workspace
-        self.memory_dir = Path(workspace / "memory")
+        self.memory_dir = Path(workspace / ".memory")
         self.history_file = self.memory_dir / "history.jsonl"
         self.memory_file = self.memory_dir / "MEMORY.md"
         self.soul_file = self.memory_dir / "SOUL.md"
@@ -228,8 +228,11 @@ class MilvusMemoryStore:
         self.milvus_client: MilvusClient | None = None
         if self._enabled:
             self.milvus_client = self._init_client()
-            self.milvus_client.load_collection(self.collection_name, replica_number=1)
-
+            if self.milvus_client:
+                self.milvus_client.load_collection(self.collection_name, replica_number=1)
+            else:
+                logger.error("Milvus client not initialized")
+                self._enabled = False
     @property
     def is_ready(self) -> bool:
         return self.milvus_client is not None

@@ -5,6 +5,16 @@ from agent_runner import EthanAgentLoop, attach_cron_job_handler, register_dream
 from config.loader import load_config
 from providers.base import AnthropicProvider
 from cron.service import CronService
+from loguru import logger
+logger.remove()
+logger.add(
+    "logs/app.log",
+    rotation="100 MB",    # 文件达到 100MB 后轮转
+    retention="30 days",  # 保留 30 天
+    compression="zip",    # 压缩旧日志
+    level="DEBUG",        # 文件记录更详细的日志
+    format="{time:YYYY-MM-DD HH:mm:ss} | {level} | {name}:{function}:{line} - {message}"
+)
 
 if __name__ == "__main__":
     api_key = os.getenv("ANTHROPIC_API_KEY") or os.getenv("DEEPSEEK_API_KEY")

@@ -23,6 +23,7 @@ from session.manager import SessionManager, Session
 from providers.base import LLMProvider, AnthropicProvider, LLMResponse
 from loguru import logger
 import os
+import uuid
 import dotenv
 import json
 
@@ -101,7 +102,7 @@ def attach_cron_job_handler(cron: CronService, loop: "EthanAgentLoop") -> None:
                 cron_tool.reset_cron_context(cron_token)
 
         response = resp if resp else ""
-        logger.info("Cron job response: {}", response)
+        print(response)
 
         return response
 
@@ -154,13 +155,14 @@ class EthanAgentLoop:
         self.concurrency_gate: asyncio.Semaphore | None = asyncio.Semaphore(3)
         self.sessions = SessionManager(workspace)
         self.session_ttl_minutes = session_ttl_minutes
+        self._cli_session_key: str | None = None
         self.context_window_tokens = 65_536
         self.memory_store = MemoryStore(workspace)
         self.embed_store = MilvusMemoryStore(workspace)
-        self.context_builder = ContextBuilder(workspace, embed_store=self.embed_store)
+        self.context_builder = ContextBuilder(workspace, embed_store=self.embed_store if self.embed_store._enabled else None)
         self.consolidator = Consolidator(
             store=self.memory_store,
-            embed_store=self.embed_store,
+            embed_store=self.embed_store if self.embed_store._enabled else None,
             provider=self.provider,
             model=self.model,
             sessions=self.sessions,
@@ -281,7 +283,15 @@ class EthanAgentLoop:
         """
         消息流程 2 : 设置并发锁
         """
-        session_key = "cli:direct"
+        if self._cli_session_key is None:
+            self._cli_session_key = (
+                os.environ.get("ETHAN_SESSION_KEY") or f"cli:{uuid.uuid4().hex[:12]}"
+            )
+            logger.info(
+                f"[EthanAgent] CLI session: {self._cli_session_key} "
+                "(export ETHAN_SESSION_KEY to reuse a fixed key)"
+            )
+        session_key = self._cli_session_key
         lock = self.session_locks.setdefault(session_key, asyncio.Lock())
         gate = self.concurrency_gate or asyncio.Semaphore(1)
         try:
@@ -298,9 +308,9 @@ class EthanAgentLoop:
         await self._connect_mcp()
         logger.info("MCP servers connected: {}", self._mcp_connected)
         preview = query[:80] + "..." if len(query) > 80 else query
-        logger.info("Processing message from {}:{}: {}", "cli", "direct", preview)
-
         key = session_key
+        logger.info("Processing message (session={}): {}", key, preview)
+
         session = self.sessions.get_or_create(key)
         
         if self._restore_runtime_checkpoint(session):
@@ -521,15 +531,9 @@ class EthanAgentLoop:
         return True
 
 
-    async def process_direct(
-        self, 
-        content: str, 
-        session_key: str = "cli:direct", 
-    ):
-        return await self._process_message(
-            content,
-            session_key,
-        )
+    async def process_direct(self, content: str, *, session_key: str) -> str | None:
+        """Run one user turn. ``session_key`` is required (no implicit default session)."""
+        return await self._process_message(content, session_key)
 
     # def _maybe_compact_session(self, session: Session) -> None:
     #     # Minimal local compaction: keep latest suffix and preserve a short summary.
