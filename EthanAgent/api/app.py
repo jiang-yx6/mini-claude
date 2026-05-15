@@ -72,6 +72,24 @@ class SessionCreateResponse(BaseModel):
     session_id: str
 
 
+class SessionItem(BaseModel):
+    session_id: str
+    key: str
+    created_at: str | None = None
+    updated_at: str | None = None
+    message_count: int = 0
+
+
+class SessionListResponse(BaseModel):
+    sessions: list[SessionItem]
+
+
+class SessionMessagesResponse(BaseModel):
+    session_id: str
+    key: str
+    messages: list[dict]
+
+
 @app.get("/api/health")
 async def health():
     return {"ok": True}
@@ -85,6 +103,56 @@ async def create_session():
     session = agent_loop.sessions.get_or_create(session_key)
     agent_loop.sessions.save(session)
     return SessionCreateResponse(session_id=raw_id)
+
+
+@app.get("/api/sessions", response_model=SessionListResponse)
+async def list_sessions():
+    agent_loop = app.state.gateway.agent_loop
+    sessions = agent_loop.sessions.list_sessions()
+    items: list[SessionItem] = []
+    for s in sessions:
+        key: str = s["key"]
+        session_id = key[4:] if key.startswith("web:") else key
+        try:
+            session = agent_loop.sessions.get_or_create(key)
+            message_count = len(session.messages)
+        except Exception:
+            message_count = 0
+        items.append(SessionItem(
+            session_id=session_id,
+            key=key,
+            created_at=s.get("created_at"),
+            updated_at=s.get("updated_at"),
+            message_count=message_count,
+        ))
+    return SessionListResponse(sessions=items)
+
+
+@app.get("/api/sessions/{session_id:path}/messages", response_model=SessionMessagesResponse)
+async def get_session_messages(session_id: str):
+    agent_loop = app.state.gateway.agent_loop
+    candidate_keys = [f"web:{session_id}", session_id]
+    session = None
+    found_key = f"web:{session_id}"
+    for key in candidate_keys:
+        try:
+            s = agent_loop.sessions.get_or_create(key)
+            if session is None or len(s.messages) > len(session.messages):
+                session = s
+                found_key = key
+        except Exception:
+            continue
+    if session is None:
+        return SessionMessagesResponse(
+            session_id=session_id,
+            key=found_key,
+            messages=[],
+        )
+    return SessionMessagesResponse(
+        session_id=session_id,
+        key=found_key,
+        messages=session.messages,
+    )
 
 
 @app.websocket("/ws")

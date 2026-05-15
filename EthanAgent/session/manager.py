@@ -249,17 +249,19 @@ class SessionManager:
     def list_sessions(self) -> list[dict[str, Any]]:
         sessions = []
         for path in self.sessions_dir.glob("*.jsonl"):
-            key = path.stem.replace("_", ":", 1)
             with open(path, encoding="utf-8") as f:
                 first_line = f.readline().strip()
-                if first_line:
-                    data = json.loads(first_line)
-                    if data.get("_type") == "metadata":
-                        sessions.append({
-                            "key": key,
-                            "created_at": data.get("created_at"),
-                            "updated_at": data.get("updated_at"),
-                            "path": str(path)
-                        })
+                if not first_line:
+                    continue
+                data = json.loads(first_line)
+                if data.get("_type") != "metadata":
+                    continue
+                key = data.get("key") or path.stem.replace("_", ":", 1)
+                sessions.append({
+                    "key": key,
+                    "created_at": data.get("created_at"),
+                    "updated_at": data.get("updated_at"),
+                    "path": str(path),
+                })
 
         return sorted(sessions, key=lambda x: x.get("updated_at", ""), reverse=True)

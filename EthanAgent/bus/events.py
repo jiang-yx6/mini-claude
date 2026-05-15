@@ -6,7 +6,7 @@ from typing import Any
 
 
 @dataclass
-class InBoundMessage:
+class InboundMessage:
     channel: str
     chat_id: str
     content: str
@@ -15,14 +15,11 @@ class InBoundMessage:
 
     @property
     def session_key(self) -> str:
-        # Web UI sessions are stored as full keys like ``web:<hex>``.
-        if self.channel == "web":
-            return self.chat_id
         return f"{self.channel}:{self.chat_id}"
 
 
 @dataclass
-class OutBoundMessage:
+class OutboundMessage:
     channel: str
     chat_id: str
     content: str

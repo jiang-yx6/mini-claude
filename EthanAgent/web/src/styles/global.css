@@ -1,0 +1,66 @@
+:root {
+  --font-sans: 'DM Sans', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, monospace;
+
+  --bg-app: #0f0e14;
+  --bg-elevated: #18171f;
+  --bg-surface: #1f1e28;
+  --bg-hover: #262533;
+  --border: rgba(255, 255, 255, 0.08);
+  --border-strong: rgba(255, 255, 255, 0.12);
+
+  --text: #e8e6f0;
+  --text-muted: #9490a8;
+  --text-faint: #6b667d;
+
+  --accent: #8b5cf6;
+  --accent-soft: rgba(139, 92, 246, 0.15);
+  --accent-glow: rgba(139, 92, 246, 0.35);
+  --user-bubble: linear-gradient(135deg, #5b21b6 0%, #7c3aed 100%);
+  --agent-bubble: #23212e;
+  --success: #34d399;
+  --danger: #f87171;
+
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --shadow: 0 8px 32px rgba(0, 0, 0, 0.35);
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  font-family: var(--font-sans);
+  font-size: 15px;
+  line-height: 1.5;
+  color: var(--text);
+  background: var(--bg-app);
+  -webkit-font-smoothing: antialiased;
+}
+
+#root {
+  height: 100%;
+  max-height: 100dvh;
+  overflow: hidden;
+}
+
+button,
+textarea {
+  font: inherit;
+}
+
+code {
+  font-family: var(--font-mono);
+  font-size: 0.82em;
+}
