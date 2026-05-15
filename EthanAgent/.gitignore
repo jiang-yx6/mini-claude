@@ -1,0 +1,8 @@
+__pycache__/
+*.jsonl
+*.pyc
+.sessions/
+.memory/
+logs/
+frontend/node_modules/
+frontend/dist/

@@ -229,9 +229,12 @@ class MilvusMemoryStore:
         if self._enabled:
             self.milvus_client = self._init_client()
             if self.milvus_client:
-                self.milvus_client.load_collection(self.collection_name, replica_number=1)
-            else:
-                logger.error("Milvus client not initialized")
+                try:
+                    self.milvus_client.load_collection(self.collection_name, replica_number=1)
+                except Exception:
+                    logger.warning("Milvus load collection failed, continuing without vector memory")
+                    self.milvus_client = None
+            if not self.milvus_client:
                 self._enabled = False
     @property
     def is_ready(self) -> bool:
@@ -243,7 +246,7 @@ class MilvusMemoryStore:
         try:
             bootstrap = MilvusClient(uri=uri, timeout=timeout)
         except Exception:
-            logger.exception("Milvus bootstrap connect failed")
+            logger.warning("Milvus bootstrap connect failed (Milvus not running, vector memory disabled)")
             return None
         try:
             databases = bootstrap.list_databases()
@@ -255,13 +258,13 @@ class MilvusMemoryStore:
                 except Exception:
                     bootstrap.create_database(db_name=self.db_name)
         except Exception:
-            logger.exception("Milvus ensure database %s failed", self.db_name)
+            logger.warning("Milvus ensure database %s failed, vector memory disabled", self.db_name)
             return None
         try:
             client = MilvusClient(uri=uri, db_name=self.db_name, timeout=timeout)
             logger.info("Milvus connected uri={} db={}", uri, self.db_name)
         except Exception:
-            logger.exception("Milvus connect to db %s failed", self.db_name)
+            logger.warning("Milvus connect to db %s failed, vector memory disabled", self.db_name)
             return None
 
         try:
@@ -290,7 +293,7 @@ class MilvusMemoryStore:
                     index_params=index_params,
                 )
         except Exception:
-            logger.exception("Milvus ensure collection %s failed", self.collection_name)
+            logger.warning("Milvus ensure collection %s failed, vector memory disabled", self.collection_name)
             return None
 
         return client

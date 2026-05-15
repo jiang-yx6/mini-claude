@@ -7,7 +7,7 @@ import re
 from datetime import datetime, timedelta
 
 from tools.tool_registry import ToolRegistry
-from typing import Any, Callable, final
+from typing import Any, Callable, final, TYPE_CHECKING
 from pathlib import Path
 from agent.context import ContextBuilder
 from agent.memory import Consolidator, Dream, MemoryStore, MilvusMemoryStore
@@ -30,6 +30,11 @@ import json
 from cron.service import CronService
 from cron.types import CronJob, CronPayload, CronSchedule
 from config.schema import MCPServerConfig
+
+from bus.events import InboundMessage, OutboundMessage
+from bus.queue import MessageBus
+if TYPE_CHECKING:
+    from bus.queue import MessageBus
 
 dotenv.load_dotenv()
 
@@ -67,8 +72,16 @@ def register_dream_system_job(
     )
 
 
-def attach_cron_job_handler(cron: CronService, loop: "EthanAgentLoop") -> None:
-    """Wire ``cron.on_job``: Dream runs ``loop.dream.run()``; other jobs use ``process_direct``."""
+def attach_cron_job_handler(
+    cron: CronService,
+    loop: "EthanAgentLoop",
+    message_bus: "MessageBus | None" = None,
+) -> None:
+    """Wire ``cron.on_job``: Dream runs ``loop.dream.run()``; other jobs use ``process_direct``.
+
+    When ``message_bus`` is set (HTTP API), optional ``deliver`` + ``session_key`` on the job
+    publishes the agent reply to the ``web`` channel for that session.
+    """
 
     async def on_cron_job(job: CronJob) -> str | None:
         if job.name == "dream":
@@ -102,8 +115,31 @@ def attach_cron_job_handler(cron: CronService, loop: "EthanAgentLoop") -> None:
                 cron_tool.reset_cron_context(cron_token)
 
         response = resp if resp else ""
-        print(response)
+        if message_bus is None:
+            print(response)
 
+        if (
+            message_bus is not None
+            and job.payload.deliver
+            and job.payload.session_key
+            and response
+        ):
+            from bus.events import OutboundMessage
+
+            target = str(job.payload.session_key).strip()
+            if target.startswith("web:"):
+                await message_bus.publish_outbound(
+                    OutboundMessage(
+                        channel="web",
+                        chat_id=target[len("web:"):],
+                        content=response,
+                        metadata={
+                            "kind": "cron",
+                            "job_id": job.id,
+                            "job_name": job.name,
+                        },
+                    )
+                )
         return response
 
     cron.on_job = on_cron_job
@@ -124,6 +160,7 @@ class AgentRunSpec(BaseModel):
 class EthanAgentLoop:   
     def __init__(
         self,
+        bus: MessageBus,
         provider: LLMProvider,
         workspace: Path,
         model: str | None = None,
@@ -133,7 +170,9 @@ class EthanAgentLoop:
         session_ttl_minutes: int = 30,
         cron_service: CronService | None = None,
         mcp_servers: dict[str, MCPServerConfig] | None = None,
+
     ):
+        self.bus = bus
         self.provider = provider
         self.workspace = workspace
         self.model = model or provider.get_default_model()
@@ -240,66 +279,57 @@ class EthanAgentLoop:
         task.add_done_callback(self._background_tasks.remove)
 
     async def _run_for_dispatch(self) -> None:
-        """
-        消息流程 1 : 接受输入，分发命令或消息
-        """
+        """Consume inbound bus and dispatch each message for processing."""
         self._running = True
-        input_task: asyncio.Task[str] | None = None
 
         while self._running:
-            if input_task is None:
-                input_task = asyncio.create_task(
-                    asyncio.to_thread(input, "\033[36ms01 >> \033[0m")
-                )
-            
-            done, _ = await asyncio.wait({input_task}, timeout=1.0)
-            if not done:
-                # 超时：执行后台任务，但继续等待同一个 input_task
+            try:
+                msg = await asyncio.wait_for(self.bus.consume_inbound(), timeout=1.0)
+            except asyncio.TimeoutError:
                 self.compactor.check_expired(
                     self._schedule_background,
                     active_session_keys=self.session_locks.keys(),
                 )
                 continue
-
-            query = input_task.result().strip()
-            input_task = None
-
-            if self.commands.is_slash_command(query):
-                await self._dispatch_command(query, self.commands.dispatch)
+            except asyncio.CancelledError:
+                if asyncio.current_task().cancelling():
+                    raise
                 continue
-            await self._dispatch(query)
+            except Exception:
+                logger.warning("_run_for_dispatch consume error, continuing...")
+                continue
 
-    async def _dispatch_command(self, query: str, dispatch_fn: Callable) -> None:
-        """
-        处理命令
-        """
-        result = await dispatch_fn(query)
-        if result:
-            print(result)
-        else:
-            print(f"Command '{query}' not found")
+            if not msg.content or not msg.content.strip():
+                continue
 
-    async def _dispatch(self, query: str) -> None:
-        """
-        消息流程 2 : 设置并发锁
-        """
-        if self._cli_session_key is None:
-            self._cli_session_key = (
-                os.environ.get("ETHAN_SESSION_KEY") or f"cli:{uuid.uuid4().hex[:12]}"
-            )
-            logger.info(
-                f"[EthanAgent] CLI session: {self._cli_session_key} "
-                "(export ETHAN_SESSION_KEY to reuse a fixed key)"
-            )
-        session_key = self._cli_session_key
+            await self._dispatch(msg)
+
+    async def _dispatch(self, msg: InboundMessage) -> None:
+        """Acquire per-session lock + concurrency gate, process, publish to outbound."""
+        session_key = msg.session_key
         lock = self.session_locks.setdefault(session_key, asyncio.Lock())
         gate = self.concurrency_gate or asyncio.Semaphore(1)
         try:
             async with lock, gate:
-                response = await self._process_message(query, session_key)
-                print(response if response else "No response")
+                response = await self._process_message(msg.content, session_key)
+            await self.bus.publish_outbound(
+                OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content=response or "",
+                    metadata={"kind": "assistant"},
+                )
+            )
         except Exception as e:
-            print(f"Error processing message: {e}")
+            logger.exception("_dispatch failed session={}", session_key)
+            await self.bus.publish_outbound(
+                OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content=str(e),
+                    metadata={"kind": "error"},
+                )
+            )
 
     async def _process_message(self, query: str, session_key: str) -> str | None:
         """

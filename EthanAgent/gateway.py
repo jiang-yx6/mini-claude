@@ -1,57 +1,139 @@
-import os
-from pathlib import Path
+"""Gateway: central orchestrator that wires bus + channels + agent + cron."""
+
+from __future__ import annotations
+
 import asyncio
-from agent_runner import EthanAgentLoop, attach_cron_job_handler, register_dream_system_job
-from config.loader import load_config
-from providers.base import AnthropicProvider
-from cron.service import CronService
+import os
+import uuid
+from pathlib import Path
+from typing import TYPE_CHECKING
+
 from loguru import logger
-logger.remove()
-logger.add(
-    "logs/app.log",
-    rotation="100 MB",    # 文件达到 100MB 后轮转
-    retention="30 days",  # 保留 30 天
-    compression="zip",    # 压缩旧日志
-    level="DEBUG",        # 文件记录更详细的日志
-    format="{time:YYYY-MM-DD HH:mm:ss} | {level} | {name}:{function}:{line} - {message}"
-)
+
+from agent_runner import EthanAgentLoop, attach_cron_job_handler, register_dream_system_job
+from bootstrap import build_agent_loop
+from bus.events import InboundMessage, OutboundMessage
+from bus.queue import MessageBus
+from channels.manager import ChannelManager
+
+if TYPE_CHECKING:
+    from channels.base import BaseChannel
+
+
+class Gateway:
+    """Central orchestrator.
+    Holds the message bus, agent loop, cron service, and channel manager.
+    Runs the inbound worker that consumes messages from the bus and feeds
+    them to the agent, then publishes responses back to the outbound queue.
+    Usage (API mode)::
+        gateway = Gateway(workspace)
+        web_ch = WebChannel(gateway.bus)
+        gateway.register_channel("web", web_ch)
+        await gateway.start()
+        # ... run FastAPI ...
+        await gateway.stop()
+    """
+    def __init__(self, workspace: Path) -> None:
+        self.workspace = workspace
+        self.bus = MessageBus()
+        self.agent_loop, self.cron = build_agent_loop(workspace,self.bus)
+        self.channel_manager = ChannelManager(self.bus)
+        self._agent_task: asyncio.Task[None] | None = None
+        self._cli_session_key: str | None = None
+
+    # -- Channel registry ----------------------------------------------------
+    def register_channel(self, name: str, channel: BaseChannel) -> None:
+        self.channel_manager.register(name, channel)
+
+    # -- Lifecycle -----------------------------------------------------------
+    async def start(self) -> None:
+        """Start channel manager dispatch, agent loop, cron wiring, and cron."""
+        attach_cron_job_handler(self.cron, self.agent_loop, message_bus=self.bus)
+        register_dream_system_job(self.cron)
+        await self.channel_manager.start()
+        self._agent_task = asyncio.create_task(self.agent_loop._run_for_dispatch())
+        await self.cron.start()
+        logger.info("Gateway: started, workspace={}", self.workspace)
+
+    async def stop(self) -> None:
+        """Gracefully stop all components in reverse order."""
+        self.agent_loop._running = False
+        if self._agent_task is not None:
+            self._agent_task.cancel()
+            try:
+                await self._agent_task
+            except asyncio.CancelledError:
+                pass
+            self._agent_task = None
+        await self.channel_manager.stop()
+        self.cron.stop()
+        await self.agent_loop.close_mcp()
+        logger.info("Gateway: stopped")
+
+
+    # -- CLI mode ------------------------------------------------------------
+
+    async def run_cli_loop(self) -> None:
+        """Blocking CLI input loop (for standalone use without API)."""
+        await self.agent_loop._connect_mcp()
+
+        if self._cli_session_key is None:
+            self._cli_session_key = (
+                os.environ.get("ETHAN_SESSION_KEY")
+                or f"cli:{uuid.uuid4().hex[:12]}"
+            )
+            logger.info(
+                "Gateway CLI session: {} (export ETHAN_SESSION_KEY to reuse)",
+                self._cli_session_key,
+            )
+
+        running = True
+        while running:
+            try:
+                query = await asyncio.to_thread(
+                    input, "\033[36ms01 >> \033[0m"
+                )
+            except (EOFError, KeyboardInterrupt):
+                break
+
+            query = query.strip()
+            if not query:
+                continue
+            if query in ("/exit", "/quit"):
+                break
+
+            try:
+                await self.bus.publish_inbound(
+                    InboundMessage(
+                        channel="cli",
+                        chat_id=self._cli_session_key,
+                        content=query,
+                    )
+                )
+                reply = await self.bus.consume_outbound()
+                print(reply.content if reply.content else "No response")
+            except Exception as exc:
+                logger.exception("CLI loop error")
+                print(f"Error: {exc}")
+
+
+# -- Standalone CLI entry point ----------------------------------------------
+
+
+def run_cli() -> None:
+    """Entry point for ``python gateway.py``."""
+    workspace = Path(__file__).resolve().parent
+    gateway = Gateway(workspace)
+
+    async def _main() -> None:
+        await gateway.start()
+        try:
+            await gateway.run_cli_loop()
+        finally:
+            await gateway.stop()
+
+    asyncio.run(_main())
+
 
 if __name__ == "__main__":
-    api_key = os.getenv("ANTHROPIC_API_KEY") or os.getenv("DEEPSEEK_API_KEY")
-    api_base = os.getenv("ANTHROPIC_API_BASE", "https://api.deepseek.com/anthropic")
-    model = os.getenv("MODEL_NAME", "deepseek-chat")
-    workspace = Path(__file__).resolve().parent
-
-    cfg = load_config(workspace) 
-    mcp_servers = {n: s for n, s in cfg.tools.mcp_servers.items() if s.enabled}
-
-    cron_store_path = workspace / "cron" / "jobs.json"
-    cron = CronService(cron_store_path)
-
-    loop = EthanAgentLoop(
-        provider=AnthropicProvider(api_base=api_base, api_key=api_key),
-        workspace=workspace,
-        model=model,
-        max_iterations=10,
-        max_tool_result_chars=4000,
-        context_block_limit=30,
-        session_ttl_minutes=30,
-        cron_service = cron,
-        mcp_servers=mcp_servers,
-    )
-
-    attach_cron_job_handler(cron, loop)
-    register_dream_system_job(cron)
-
-    async def main():
-        try:
-            await loop._connect_mcp()
-            await asyncio.gather(
-                loop._run_for_dispatch(),
-                cron.start(),
-            )
-        finally:
-            await loop.close_mcp()
-            cron.stop()
-
-    asyncio.run(main())
+    run_cli()

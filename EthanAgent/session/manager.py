@@ -185,7 +185,7 @@ class SessionManager:
     def _load(self, key: str) -> Session:
         path = self._session_path(key)
         if not path.exists():
-            logger.warning(f"Session file not found: {path}")
+            logger.debug("Session file not found (will create): {}", path)
             return None        
         try:
             messages = []

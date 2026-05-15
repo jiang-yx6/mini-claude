@@ -50,6 +50,7 @@ class CronTool(Tool):
     def set_session_key(self, session_key: str) -> None:
         self._session_key.set(session_key)
 
+    #禁止在「正在执行 cron 回调」的上下文里再嵌套加新任务，减少递归/混乱调度。
     def set_cron_context(self, active: bool):
         return self._in_cron_context.set(active)
 
