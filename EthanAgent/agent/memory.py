@@ -599,10 +599,10 @@ You have TWO tasks:
 2) Deduplicate: flag redundant/overlapping content across memory files even if not in history.
 
 Output one line per finding:
-- [memory/USER.md] atomic fact (identity, preferences)
-- [memory/SOUL.md] bot tone/behavior rule
-- [memory/MEMORY.md] durable project/context fact
-- [memory/<path>-REMOVE] reason to delete a redundant line or section
+- [.memory/USER.md] atomic fact (identity, preferences)
+- [.memory/SOUL.md] bot tone/behavior rule
+- [.memory/MEMORY.md] durable project/context fact
+- [.memory/<path>-REMOVE] reason to delete a redundant line or section
 
 Rules:
 - Atomic facts only; skip transient errors, filler, weather.
@@ -610,24 +610,24 @@ Rules:
 - If nothing needs updating, output a single line: [SKIP]
 
 Workspace layout (relative paths only):
-- memory/SOUL.md — bot behavior and tone
-- memory/USER.md — user identity and preferences
-- memory/MEMORY.md — project facts and durable context
+- .memory/SOUL.md — bot behavior and tone
+- .memory/USER.md — user identity and preferences
+- .memory/MEMORY.md — project facts and durable context
 """
 
 
 _DREAM_PHASE2_SYSTEM = """You apply the Phase-1 analysis by editing files with tools.
 
 ## Allowed paths (relative to workspace root)
-- memory/SOUL.md
-- memory/USER.md
-- memory/MEMORY.md
+- .memory/SOUL.md
+- .memory/USER.md
+- .memory/MEMORY.md
 
 ## Rules
 - Use read_file when you need the exact current file body; use edit_file for surgical replacements (unique old_text).
 - Do not rewrite entire memory files unless the analysis explicitly requires a full restructure (prefer incremental edits).
 - If Phase-1 was [SKIP] or there is nothing to change, respond with a short text and do not call tools.
-- Dedup: remove or shorten redundant bullets per the analysis [memory/...-REMOVE] lines.
+- Dedup: remove or shorten redundant bullets per the analysis [.memory/...-REMOVE] lines.
 """
 
 
@@ -707,9 +707,9 @@ class Dream:
         user = _truncate(self.store.read_user(), self._PREVIEW_USER) or "(empty)"
         file_ctx = (
             f"## Current date\n{current_date}\n\n"
-            f"## memory/MEMORY.md\n{mem}\n\n"
-            f"## memory/SOUL.md\n{soul}\n\n"
-            f"## memory/USER.md\n{user}"
+            f"## .memory/MEMORY.md\n{mem}\n\n"
+            f"## .memory/SOUL.md\n{soul}\n\n"
+            f"## .memory/USER.md\n{user}"
         )
         phase1_user = f"## History batch\n{history_text}\n\n{file_ctx}"
 

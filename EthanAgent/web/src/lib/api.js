@@ -92,6 +92,12 @@ export function getSessionMessages(sessionId, signal) {
 export function normalizeContent(content) {
   if (typeof content === 'string') return content
   if (content == null) return ''
+  if (Array.isArray(content)) {
+    return content
+      .filter(item => item && item.type === 'text' && typeof item.text === 'string')
+      .map(item => item.text)
+      .join('\n')
+  }
   return JSON.stringify(content, null, 2)
 }
 
@@ -101,13 +107,31 @@ export function normalizeContent(content) {
  * @returns {{ id: string, role: string, text: string, timestamp?: string }[]}
  */
 export function mapApiMessages(rows) {
-  return (rows || []).map((m, i) => ({
-    // Timestamps are not unique (user/assistant often share one); index keeps React keys stable.
-    id: `msg-${i}-${m.role ?? 'unknown'}-${m.timestamp ?? ''}`,
-    role: m.role || 'system',
-    text: normalizeContent(m.content),
-    timestamp: m.timestamp,
-  }))
+  return (rows || [])
+    .map((m, i) => ({
+      id: `msg-${i}-${m.role ?? 'unknown'}-${m.timestamp ?? ''}`,
+      role: m.role || 'system',
+      text: normalizeContent(m.content),
+      timestamp: m.timestamp,
+    }))
+    .filter(m => m.text.length > 0)
+}
+
+/**
+ * @returns {Promise<{
+ *   agent: { status: string, model: string, uptime_seconds: number, version: string, pid: number, start_time: string },
+ *   sessions: { total: number, web: number, cli: number, cron: number },
+ *   channels: { active_connections: number, registered: number },
+ *   cron: { total: number, jobs: Array<{ id: string, name: string, enabled: boolean, schedule_kind: string, next_run_at_ms: number | null, last_status: string | null, last_duration_ms: number | null }> } | null,
+ *   tools: { total: number, names: string[] },
+ *   mcp: { connected: boolean, servers: string[] },
+ *   memory: { initialized: boolean },
+ *   usage: { prompt_tokens: number, completion_tokens: number, context_total: number },
+ *   activity: Array<{ time: string, text: string, kind: string, context_total: number, context_token: number }>
+ * }>}
+ */
+export function getAgentStatus() {
+  return request('/api/agent/status')
 }
 
 /** Outbound WS chat frame */

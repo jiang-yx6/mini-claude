@@ -40,6 +40,7 @@ class Gateway:
         self.channel_manager = ChannelManager(self.bus)
         self._agent_task: asyncio.Task[None] | None = None
         self._cli_session_key: str | None = None
+        self._start_time: float | None = None
 
     # -- Channel registry ----------------------------------------------------
     def register_channel(self, name: str, channel: BaseChannel) -> None:
@@ -48,6 +49,10 @@ class Gateway:
     # -- Lifecycle -----------------------------------------------------------
     async def start(self) -> None:
         """Start channel manager dispatch, agent loop, cron wiring, and cron."""
+        import time
+        now = time.time()
+        self._start_time = now
+        self.agent_loop._start_time = now
         attach_cron_job_handler(self.cron, self.agent_loop, message_bus=self.bus)
         register_dream_system_job(self.cron)
         await self.channel_manager.start()
@@ -72,7 +77,6 @@ class Gateway:
 
 
     # -- CLI mode ------------------------------------------------------------
-
     async def run_cli_loop(self) -> None:
         """Blocking CLI input loop (for standalone use without API)."""
         await self.agent_loop._connect_mcp()

@@ -41,6 +41,32 @@ dotenv.load_dotenv()
 
 _MAX_LENGTH_RECOVERIES = 3
 
+
+def _format_content_blocks_for_stream(blocks: list[dict[str, Any]]) -> str:
+    """Convert assistant content_blocks to a markdown string for streaming display."""
+    parts: list[str] = []
+    for block in blocks:
+        if block.get("type") == "text":
+            parts.append(str(block["text"]))
+        elif block.get("type") == "tool_use":
+            name = block.get("name", "unknown")
+            inp = block.get("input", {})
+            inp_str = json.dumps(inp, ensure_ascii=False, indent=2)
+            parts.append(f"\n\n**调用工具: `{name}`**\n```json\n{inp_str}\n```\n")
+    return "".join(parts)
+
+
+def _format_tool_results_for_stream(tool_result_blocks: list[dict[str, Any]]) -> str:
+    """Convert tool_result blocks to a markdown string for streaming display."""
+    lines: list[str] = []
+    for block in tool_result_blocks:
+        tid = block.get("tool_use_id", "unknown")
+        content = str(block.get("content", ""))
+        if len(content) > 2000:
+            content = content[:2000] + "\n... (结果已截断)"
+        lines.append(f"**工具结果** (`{tid}`):\n```\n{content}\n```")
+    return "\n".join(lines)
+
 # Anthropic-style messages: tool results live in ``user`` content blocks (type tool_result).
 _MICROCOMPACT_KEEP_RECENT = 10
 _MICROCOMPACT_MIN_CHARS = 500
@@ -53,7 +79,7 @@ _COMPACTABLE_TOOLS = frozenset({
     "web_fetch",
 })
 
-_DEFAULT_DREAM_INTERVAL_MS = 2 * 3600_000 # 2 hours
+_DEFAULT_DREAM_INTERVAL_MS = 1800_000 # 0.5 hours
 
 
 def register_dream_system_job(
@@ -155,6 +181,7 @@ class AgentRunSpec(BaseModel):
     max_tokens: int | None = None
     temperature: float | None = None
 
+    progress_callback: Callable[[dict[str, Any]], Any] | None = None
     checkpoint_callback: Callable[[dict[str, Any]], Any] | None = None
 
 class EthanAgentLoop:   
@@ -226,6 +253,11 @@ class EthanAgentLoop:
         self._mcp_stacks: dict[str, AsyncExitStack] = {}
         self._mcp_connected = False
         self._mcp_connecting = False
+
+        self._start_time: float | None = None
+        self._total_prompt_tokens = 0
+        self._total_completion_tokens = 0
+        self._turn_count = 0
 
     async def _connect_mcp(self) -> None:
         if self._mcp_connected or self._mcp_connecting or not self._mcp_servers:
@@ -301,8 +333,25 @@ class EthanAgentLoop:
 
             if not msg.content or not msg.content.strip():
                 continue
-
+            if msg.session_key and self.commands.is_slash_command(msg.content):
+                await self._dispatch_command(msg, self.commands.dispatch)
+                continue
             await self._dispatch(msg)
+
+    async def _dispatch_command(self, msg: InboundMessage, dispatch_fn:Callable):
+        query = msg.content.strip()
+        result = await dispatch_fn(query)
+        if result:
+            await self.bus.publish_outbound(
+                OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content= result or "",
+                    metadata={"kind": "assistant"},
+                )
+            )
+        else:
+            logger.warning("Command '{}' matched but dispatch returned None",query)
 
     async def _dispatch(self, msg: InboundMessage) -> None:
         """Acquire per-session lock + concurrency gate, process, publish to outbound."""
@@ -421,6 +470,11 @@ class EthanAgentLoop:
         final_text = result.get("final_text")
         messages = result.get("messages")
         stop_reason = result.get("stop_reason")
+
+        usage = result.get("usage", {})
+        self._total_prompt_tokens = usage.get("prompt_tokens", 0)
+        self._total_completion_tokens = usage.get("completion_tokens", 0)
+        self._turn_count += 1
 
         return final_text, messages, stop_reason
 
